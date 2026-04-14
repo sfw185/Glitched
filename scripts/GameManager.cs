@@ -1,117 +1,463 @@
 using Godot;
+using System.Linq;
 
 public partial class GameManager : Node
 {
-    public static GameManager? Instance { get; private set; }
+	public static GameManager? Instance { get; private set; }
 
-    [Export] public int PlayerCount = 2;
+	[Export] public int PlayerCount = 2;
 
-    private const int StartingLives = 3;
+	// --- Round timing (seconds) ---
+	private const float PlayDuration   = 60f;
+	private const float ShrinkDuration = 30f;
+	private const float RoundEndPause  =  3f;
 
-    private int[] _lives = [];
-    private Label[] _livesLabels = [];
-    private Label _winLabel = null!;
-    private bool _gameOver = false;
+	// --- Arena geometry ---
+	private const float ViewportWidth  = 1280f;
+	private const float ViewportHeight =   720f;
+	private const float ArenaCenterX   =   640f;
 
-    public override void _Ready()
-    {
-        Instance = this;
-        _lives = new int[PlayerCount];
-        _livesLabels = new Label[PlayerCount];
+	// Minimum safe zone: proven reachable with double jump.
+	// At this width (350 px) any two platforms within range satisfy MaxGap ≤ 200 px
+	// and MaxHeightStep ≤ 160 px — see LevelGenerator for the physics proof.
+	private const float MinArenaWidth  =  350f;
 
-        var hud = GetNode<CanvasLayer>("../HUD");
-        _winLabel = hud.GetNode<Label>("WinLabel");
+	// Width of the visible wall face that advances into the arena.
+	// Players are clamped to the inner edge of this face (EffectiveLeft/Right).
+	private const float WallFaceWidth  =   50f;
 
-        for (int i = 0; i < PlayerCount; i++)
-        {
-            _lives[i] = StartingLives;
-            _livesLabels[i] = CreateLivesLabel(i, hud);
-            UpdateLivesUI(i, StartingLives);
-        }
-    }
+	// --- Match scoring ---
+	private const int WinScore = 5;
 
-    public override void _ExitTree()
-    {
-        if (Instance == this) Instance = null;
-    }
+	// Static fields survive ReloadCurrentScene so scores persist across rounds.
+	private static int[]? _scores;
+	private static int    _scoredPlayerCount;
 
-    public void OnPlayerHit(int playerIndex, int remainingLives)
-    {
-        _lives[playerIndex] = remainingLives;
-        UpdateLivesUI(playerIndex, remainingLives);
-    }
+	// --- Phase state machine ---
+	private enum Phase { Playing, Shrinking, RoundEnd, MatchEnd }
+	private Phase _phase     = Phase.Playing;
+	private float _phaseTimer = 0f;
+	private float _endTimer   = 0f;
 
-    public void OnPlayerEliminated(int playerIndex)
-    {
-        _lives[playerIndex] = 0;
-        UpdateLivesUI(playerIndex, 0);
+	// --- Live arena bounds — read by Player.ClampToBounds each physics tick ---
+	public float LeftBound    { get; private set; } = 0f;
+	public float RightBound   { get; private set; } = ViewportWidth;
+	public bool  IsShrinking  => _phase == Phase.Shrinking;
 
-        // Count survivors
-        int survivorIndex = -1;
-        int survivors = 0;
-        for (int i = 0; i < PlayerCount; i++)
-        {
-            if (i != playerIndex && _lives[i] > 0)
-            {
-                survivorIndex = i;
-                survivors++;
-            }
-        }
+	// Inner edge of the wall face — the actual playable boundary players are clamped to.
+	public float EffectiveLeft  => LeftBound  + WallFaceWidth;
+	public float EffectiveRight => RightBound - WallFaceWidth;
 
-        if (survivors == 1)
-            ShowWinner(survivorIndex + 1); // 1-indexed display
-    }
+	// --- HUD nodes (created at runtime) ---
+	private Label[] _scoreLabels  = [];
+	private Label   _timerLabel   = null!;
+	private Label   _messageLabel = null!;
 
-    public override void _Process(double delta)
-    {
-        if (!_gameOver) return;
+	// --- Danger zone visuals (HUD CanvasLayer ColorRects, created at runtime) ---
+	// Rendered in the HUD CanvasLayer so they always appear above 2D world content.
+	private ColorRect _leftOverlay  = null!;
+	private ColorRect _rightOverlay = null!;
+	private ColorRect _leftWall     = null!;
+	private ColorRect _rightWall    = null!;
+	private ColorRect _leftEdge     = null!;
+	private ColorRect _rightEdge    = null!;
 
-        for (int i = 0; i < PlayerCount; i++)
-        {
-            if (Input.IsActionJustPressed($"p{i + 1}_jump"))
-            {
-                GetTree().ReloadCurrentScene();
-                return;
-            }
-        }
-    }
+	// --- Audio ---
+	private AudioStreamPlayer _audio = null!;
 
-    // --- Private helpers ---
+	private static AudioStreamWav? _sndRoundStart;
+	private static AudioStreamWav? _sndEliminate;
 
-    private Label CreateLivesLabel(int playerIndex, CanvasLayer hud)
-    {
-        const float LabelWidth = 220f;
-        const float ViewportWidth = 1280f;
-        const float Padding = 20f;
+	// -------------------------------------------------------------------------
+	// Lifecycle
+	// -------------------------------------------------------------------------
 
-        float t = PlayerCount > 1 ? (float)playerIndex / (PlayerCount - 1) : 0.5f;
-        float centerX = Mathf.Lerp(Padding + LabelWidth / 2f,
-                                    ViewportWidth - Padding - LabelWidth / 2f, t);
+	public override void _Ready()
+	{
+		Instance = this;
 
-        var label = new Label
-        {
-            OffsetLeft   = centerX - LabelWidth / 2f,
-            OffsetTop    = 16f,
-            OffsetRight  = centerX + LabelWidth / 2f,
-            OffsetBottom = 48f,
-            HorizontalAlignment = HorizontalAlignment.Center
-        };
-        label.AddThemeFontSizeOverride("font_size", 22);
+		// Reuse scores if they exist for the same player count; otherwise reset.
+		if (_scores == null || _scoredPlayerCount != PlayerCount)
+		{
+			_scores            = new int[PlayerCount];
+			_scoredPlayerCount = PlayerCount;
+		}
 
-        hud.AddChild(label);
-        return label;
-    }
+		LeftBound  = 0f;
+		RightBound = ViewportWidth;
 
-    private void UpdateLivesUI(int playerIndex, int lives)
-    {
-        string pips = new string('●', lives) + new string('○', StartingLives - lives);
-        _livesLabels[playerIndex].Text = $"P{playerIndex + 1}  {pips}";
-    }
+		SetupDangerZones();
+		SetupHUD();
 
-    private void ShowWinner(int winnerDisplay)
-    {
-        _gameOver = true;
-        _winLabel.Text = $"Player {winnerDisplay} Wins!\n\nPress jump to play again";
-        _winLabel.Visible = true;
-    }
+		_sndRoundStart ??= SynthRoundStart();
+		_sndEliminate  ??= SynthEliminate();
+		_audio = new AudioStreamPlayer { VolumeDb = -4f };
+		AddChild(_audio);
+
+		PlaySound(_sndRoundStart!);
+	}
+
+	public override void _ExitTree()
+	{
+		if (Instance == this) Instance = null;
+	}
+
+	// -------------------------------------------------------------------------
+	// Public API (called by Player)
+	// -------------------------------------------------------------------------
+
+	/// Called by Player.Eliminate() when a stomp occurs.
+	/// Victim's IsEliminated flag is already true when this is called.
+	public void OnPlayerEliminated(int victimIndex, int _killerIndex)
+	{
+		if (_phase is Phase.RoundEnd or Phase.MatchEnd) return;
+
+		PlaySound(_sndEliminate!);
+
+		// Because victim.IsEliminated is already true, they are excluded here.
+		var survivors = GetTree()
+			.GetNodesInGroup("players")
+			.OfType<Player>()
+			.Where(p => !p.IsEliminated)
+			.ToList();
+
+		if (survivors.Count == 1)
+			HandleRoundWin(survivors[0].PlayerIndex);
+		else if (survivors.Count == 0)
+			StartRoundEnd("Draw!");
+		// else: 3+ player game, round continues
+	}
+
+	// -------------------------------------------------------------------------
+	// Update loop
+	// -------------------------------------------------------------------------
+
+	public override void _Process(double delta)
+	{
+		switch (_phase)
+		{
+			case Phase.Playing:   UpdatePlaying(delta);   break;
+			case Phase.Shrinking: UpdateShrinking(delta); break;
+			case Phase.RoundEnd:  UpdateRoundEnd(delta);  break;
+			case Phase.MatchEnd:  UpdateMatchEnd();       break;
+		}
+	}
+
+	private void UpdatePlaying(double delta)
+	{
+		_phaseTimer += (float)delta;
+		float remaining = PlayDuration - _phaseTimer;
+		_timerLabel.Text     = Mathf.Max(1, Mathf.CeilToInt(remaining)).ToString();
+		_timerLabel.Modulate = Colors.White;
+
+		if (_phaseTimer >= PlayDuration)
+			StartShrinking();
+	}
+
+	private void UpdateShrinking(double delta)
+	{
+		_phaseTimer += (float)delta;
+
+		// Advance boundaries inward — stop lerping once fully shrunk
+		float t    = Mathf.Clamp(_phaseTimer / ShrinkDuration, 0f, 1f);
+		float half = Mathf.Lerp(ViewportWidth / 2f, MinArenaWidth / 2f, t);
+		LeftBound  = ArenaCenterX - half;
+		RightBound = ArenaCenterX + half;
+
+		UpdateDangerZoneVisuals();
+
+		// Hide timer once walls have fully closed — round only ends via stomp
+		if (_phaseTimer >= ShrinkDuration)
+		{
+			_timerLabel.Visible = false;
+			return;
+		}
+
+		// Timer display — flash to signal urgency
+		float remaining      = ShrinkDuration - _phaseTimer;
+		_timerLabel.Text     = Mathf.CeilToInt(remaining).ToString();
+		bool flashOn         = (_phaseTimer % 0.5f) < 0.25f;
+		_timerLabel.Modulate = flashOn ? Colors.White : new Color(0.45f, 0.45f, 0.45f, 1f);
+	}
+
+	private void UpdateRoundEnd(double delta)
+	{
+		_endTimer -= (float)delta;
+		if (_endTimer <= 0f)
+			GetTree().ReloadCurrentScene();
+	}
+
+	private void UpdateMatchEnd()
+	{
+		for (int i = 0; i < PlayerCount; i++)
+		{
+			if (!Input.IsActionJustPressed($"p{i + 1}_jump")) continue;
+			_scores = null; // reset for new match
+			GetTree().ReloadCurrentScene();
+			return;
+		}
+	}
+
+	// -------------------------------------------------------------------------
+	// Phase transitions
+	// -------------------------------------------------------------------------
+
+	private void StartShrinking()
+	{
+		_phase      = Phase.Shrinking;
+		_phaseTimer = 0f;
+	}
+
+	private void HandleRoundWin(int winnerIndex)
+	{
+		_scores![winnerIndex]++;
+		UpdateScoreUI(winnerIndex);
+
+		if (_scores[winnerIndex] >= WinScore)
+			StartMatchEnd(winnerIndex);
+		else
+			StartRoundEnd($"P{winnerIndex + 1} scores!  ({_scores[winnerIndex]}/{WinScore})");
+	}
+
+	private void StartRoundEnd(string message)
+	{
+		_phase                 = Phase.RoundEnd;
+		_endTimer              = RoundEndPause;
+		_messageLabel.Text     = message;
+		_messageLabel.Visible  = true;
+		_timerLabel.Visible    = false;
+	}
+
+	private void StartMatchEnd(int winnerIndex)
+	{
+		_phase = Phase.MatchEnd;
+		_messageLabel.Text    = $"P{winnerIndex + 1} wins the match!\n\nPress jump to play again";
+		_messageLabel.Visible = true;
+		_timerLabel.Visible   = false;
+	}
+
+	// -------------------------------------------------------------------------
+	// HUD setup (all labels created at runtime)
+	// -------------------------------------------------------------------------
+
+	private void SetupHUD()
+	{
+		var hud = GetNode<CanvasLayer>("../HUD");
+
+		// Per-player score labels, evenly distributed across the top
+		_scoreLabels = new Label[PlayerCount];
+		for (int i = 0; i < PlayerCount; i++)
+		{
+			_scoreLabels[i] = CreateLabel(hud, fontSize: 22);
+			PositionLabelTopEdge(_scoreLabels[i], playerIndex: i);
+			UpdateScoreUI(i);
+		}
+
+		// Timer — top centre
+		_timerLabel = CreateLabel(hud, fontSize: 36);
+		_timerLabel.HorizontalAlignment = HorizontalAlignment.Center;
+		_timerLabel.OffsetLeft   = ArenaCenterX - 50f;
+		_timerLabel.OffsetTop    =  8f;
+		_timerLabel.OffsetRight  = ArenaCenterX + 50f;
+		_timerLabel.OffsetBottom = 56f;
+
+		// Round / match outcome message — centred, hidden until needed
+		_messageLabel = CreateLabel(hud, fontSize: 30);
+		_messageLabel.HorizontalAlignment = HorizontalAlignment.Center;
+		_messageLabel.AutowrapMode        = TextServer.AutowrapMode.Word;
+		_messageLabel.AnchorLeft    = 0.5f;
+		_messageLabel.AnchorRight   = 0.5f;
+		_messageLabel.AnchorTop     = 0.5f;
+		_messageLabel.AnchorBottom  = 0.5f;
+		_messageLabel.OffsetLeft    = -280f;
+		_messageLabel.OffsetRight   =  280f;
+		_messageLabel.OffsetTop     =  -70f;
+		_messageLabel.OffsetBottom  =   70f;
+		_messageLabel.Visible       = false;
+	}
+
+	private void PositionLabelTopEdge(Label label, int playerIndex)
+	{
+		const float LabelWidth = 200f;
+		const float Padding    =  20f;
+
+		float t = PlayerCount > 1 ? (float)playerIndex / (PlayerCount - 1) : 0.5f;
+		float cx = Mathf.Lerp(Padding + LabelWidth / 2f,
+							  ViewportWidth - Padding - LabelWidth / 2f, t);
+
+		label.HorizontalAlignment = HorizontalAlignment.Center;
+		label.OffsetLeft   = cx - LabelWidth / 2f;
+		label.OffsetTop    = 10f;
+		label.OffsetRight  = cx + LabelWidth / 2f;
+		label.OffsetBottom = 40f;
+	}
+
+	private static Label CreateLabel(CanvasLayer parent, int fontSize)
+	{
+		var l = new Label();
+		l.AddThemeFontSizeOverride("font_size", fontSize);
+		parent.AddChild(l);
+		return l;
+	}
+
+	private void UpdateScoreUI(int playerIndex) =>
+		_scoreLabels[playerIndex].Text = $"P{playerIndex + 1}   {_scores![playerIndex]}";
+
+	// -------------------------------------------------------------------------
+	// Danger zone visuals
+	// -------------------------------------------------------------------------
+
+	private void SetupDangerZones()
+	{
+		var hud = GetNode<CanvasLayer>("../HUD");
+
+		// Back: void tint that fills the dead zone
+		_leftOverlay  = MakeDangerRect(hud, new Color(0.04f, 0.04f, 0.04f, 0.94f));
+		_rightOverlay = MakeDangerRect(hud, new Color(0.04f, 0.04f, 0.04f, 0.94f));
+
+		// Mid: pulsing wall face
+		_leftWall  = MakeDangerRect(hud, Colors.Transparent);
+		_rightWall = MakeDangerRect(hud, Colors.Transparent);
+
+		// Front: crisp white kill-line at inner edge
+		_leftEdge  = MakeDangerRect(hud, Colors.White);
+		_rightEdge = MakeDangerRect(hud, Colors.White);
+
+		// Hidden until shrinking begins
+		SetDangerZonesVisible(false);
+	}
+
+	private void SetDangerZonesVisible(bool visible)
+	{
+		_leftOverlay.Visible  = visible;
+		_rightOverlay.Visible = visible;
+		_leftWall.Visible     = visible;
+		_rightWall.Visible    = visible;
+		_leftEdge.Visible     = visible;
+		_rightEdge.Visible    = visible;
+	}
+
+	private static ColorRect MakeDangerRect(CanvasLayer parent, Color color)
+	{
+		var r = new ColorRect { Color = color, MouseFilter = Control.MouseFilterEnum.Ignore };
+		parent.AddChild(r);
+		return r;
+	}
+
+	private void UpdateDangerZoneVisuals()
+	{
+		const float Top    = -60f;
+		const float Height = ViewportHeight + 120f;
+		const float EdgeW  =   6f;
+
+		SetDangerZonesVisible(true);
+
+		// Wall face pulses at 2 Hz — bright on dark background
+		float pulse     = 0.72f + 0.28f * Mathf.Sin(_phaseTimer * Mathf.Pi * 4f);
+		var   wallColor = new Color(pulse, pulse, pulse, 1f);
+		_leftWall.Color  = wallColor;
+		_rightWall.Color = wallColor;
+
+		float eleft  = EffectiveLeft;   // LeftBound  + WallFaceWidth
+		float eright = EffectiveRight;  // RightBound - WallFaceWidth
+
+		// --- Left side ---
+		_leftOverlay.Position = new Vector2(-60f, Top);
+		_leftOverlay.Size     = new Vector2(60f + LeftBound, Height);
+
+		_leftWall.Position = new Vector2(LeftBound, Top);
+		_leftWall.Size     = new Vector2(WallFaceWidth, Height);
+
+		_leftEdge.Position = new Vector2(eleft - EdgeW / 2f, Top);
+		_leftEdge.Size     = new Vector2(EdgeW, Height);
+
+		// --- Right side ---
+		_rightOverlay.Position = new Vector2(RightBound, Top);
+		_rightOverlay.Size     = new Vector2(ViewportWidth - RightBound + 60f, Height);
+
+		_rightWall.Position = new Vector2(eright, Top);
+		_rightWall.Size     = new Vector2(WallFaceWidth, Height);
+
+		_rightEdge.Position = new Vector2(eright - EdgeW / 2f, Top);
+		_rightEdge.Size     = new Vector2(EdgeW, Height);
+	}
+
+	// -------------------------------------------------------------------------
+	// Audio
+	// -------------------------------------------------------------------------
+
+	private void PlaySound(AudioStreamWav stream)
+	{
+		_audio.Stream = stream;
+		_audio.Play();
+	}
+
+	// Rising tri-tone arpeggio — signals round start.
+	private static AudioStreamWav SynthRoundStart()
+	{
+		const int   Rate = 8000;
+		const float Dur  = 0.45f;
+		int         n    = (int)(Rate * Dur);
+		var         data = new byte[n];
+
+		// Three rising square blips: 220, 330, 440 Hz, each ~0.13 s
+		float[] freqs   = [220f, 330f, 440f];
+		int     segLen  = n / 3;
+
+		for (int seg = 0; seg < 3; seg++)
+		{
+			float freq  = freqs[seg];
+			float phase = 0f;
+			int   start = seg * segLen;
+			int   end   = (seg == 2) ? n : start + segLen;
+
+			for (int i = start; i < end; i++)
+			{
+				float t   = (float)(i - start) / segLen;
+				float env = (1f - t) * Mathf.Min(1f, t * 8f); // quick attack, decay
+				phase    += freq / Rate;
+				float sq  = (phase % 1f) < 0.5f ? 1f : -1f;
+				data[i]   = (byte)(sbyte)(sq * env * 80f);
+			}
+		}
+
+		return new AudioStreamWav
+		{
+			Data    = data,
+			Format  = AudioStreamWav.FormatEnum.Format8Bits,
+			MixRate = Rate,
+			Stereo  = false
+		};
+	}
+
+	// Descending chromatic buzz — signals elimination.
+	private static AudioStreamWav SynthEliminate()
+	{
+		const int   Rate = 8000;
+		const float Dur  = 0.30f;
+		int         n    = (int)(Rate * Dur);
+		var         data = new byte[n];
+		float       phase = 0f;
+
+		for (int i = 0; i < n; i++)
+		{
+			float t    = (float)i / n;
+			float freq = 280f - 200f * t;           // pitch falls 280 → 80 Hz
+			float env  = Mathf.Exp(-t * 8f);        // smooth decay
+			phase     += freq / Rate;
+			float sq   = (phase % 1f) < 0.5f ? 1f : -1f;
+			// Mix square with noise for a gritty crunch
+			float noise = (float)((i * 1664525 + 1013904223) & 0x7FFF) / 0x7FFF * 2f - 1f;
+			float s     = (sq * 0.65f + noise * 0.35f) * env;
+			data[i]     = (byte)(sbyte)(s * 90f);
+		}
+
+		return new AudioStreamWav
+		{
+			Data    = data,
+			Format  = AudioStreamWav.FormatEnum.Format8Bits,
+			MixRate = Rate,
+			Stereo  = false
+		};
+	}
 }
