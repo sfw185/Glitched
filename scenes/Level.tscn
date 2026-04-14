@@ -39,19 +39,19 @@ color = Color(0.3, 0.3, 0.3, 1)
 shape = SubResource("Shape_ground")
 
 [node name="WallLeft" type="StaticBody2D" parent="."]
-position = Vector2(-20, 360)
+position = Vector2(-2, 360)
 
 [node name="CollisionShape2D" type="CollisionShape2D" parent="WallLeft"]
 shape = SubResource("Shape_wall")
 
 [node name="WallRight" type="StaticBody2D" parent="."]
-position = Vector2(1300, 360)
+position = Vector2(1282, 360)
 
 [node name="CollisionShape2D" type="CollisionShape2D" parent="WallRight"]
 shape = SubResource("Shape_wall")
 
 [node name="Ceiling" type="StaticBody2D" parent="."]
-position = Vector2(640, -20)
+position = Vector2(640, 34)
 
 [node name="CollisionShape2D" type="CollisionShape2D" parent="Ceiling"]
 shape = SubResource("Shape_ceiling")

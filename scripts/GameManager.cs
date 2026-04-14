@@ -8,7 +8,7 @@ public partial class GameManager : Node
 	[Export] public int PlayerCount = 2;
 
 	// --- Round timing (seconds) ---
-	private const float PlayDuration   = 60f;
+	private const float PlayDuration   = 30f;
 	private const float ShrinkDuration = 30f;
 	private const float RoundEndPause  =  3f;
 
@@ -23,8 +23,16 @@ public partial class GameManager : Node
 	private const float MinArenaWidth  =  350f;
 
 	// Width of the visible wall face that advances into the arena.
-	// Players are clamped to the inner edge of this face (EffectiveLeft/Right).
-	private const float WallFaceWidth  =   50f;
+	// Must equal the static boundary strip width in LevelGenerator.DecorateArena
+	// so the shrink wall starts exactly where the permanent strip ends — no jolt.
+	private const float WallFaceWidth  =   18f;
+
+	// Exposed so Player can soft-clamp during the non-shrink phase.
+	public  const float StaticBoundaryInset = WallFaceWidth;
+	public  const float ViewportWidthConst  = ViewportWidth;
+
+	// Pixels reserved at the top of the viewport for the HUD bar.
+	private const float HudHeight = 54f;
 
 	// --- Match scoring ---
 	private const int WinScore = 5;
@@ -35,9 +43,10 @@ public partial class GameManager : Node
 
 	// --- Phase state machine ---
 	private enum Phase { Playing, Shrinking, RoundEnd, MatchEnd }
-	private Phase _phase     = Phase.Playing;
-	private float _phaseTimer = 0f;
-	private float _endTimer   = 0f;
+	private Phase _phase        = Phase.Playing;
+	private float _phaseTimer   = 0f;
+	private float _endTimer     = 0f;
+	private bool  _shrinkLocked = false;   // true once walls reach minimum size
 
 	// --- Live arena bounds — read by Player.ClampToBounds each physics tick ---
 	public float LeftBound    { get; private set; } = 0f;
@@ -158,20 +167,27 @@ public partial class GameManager : Node
 	{
 		_phaseTimer += (float)delta;
 
-		// Advance boundaries inward — stop lerping once fully shrunk
+		// Advance boundaries inward — lerp clamps at t=1 so bounds freeze naturally
 		float t    = Mathf.Clamp(_phaseTimer / ShrinkDuration, 0f, 1f);
 		float half = Mathf.Lerp(ViewportWidth / 2f, MinArenaWidth / 2f, t);
 		LeftBound  = ArenaCenterX - half;
 		RightBound = ArenaCenterX + half;
 
-		UpdateDangerZoneVisuals();
-
-		// Hide timer once walls have fully closed — round only ends via stomp
 		if (_phaseTimer >= ShrinkDuration)
 		{
+			// Walls fully closed — freeze visuals solid on the first frame, then stop updating
+			if (!_shrinkLocked)
+			{
+				_shrinkLocked        = true;
+				_leftWall.Color      = LevelGenerator.ThemeAccent;
+				_rightWall.Color     = LevelGenerator.ThemeAccent;
+				UpdateDangerZoneVisuals(pulse: false);
+			}
 			_timerLabel.Visible = false;
 			return;
 		}
+
+		UpdateDangerZoneVisuals(pulse: true);
 
 		// Timer display — flash to signal urgency
 		float remaining      = ShrinkDuration - _phaseTimer;
@@ -242,26 +258,48 @@ public partial class GameManager : Node
 
 	private void SetupHUD()
 	{
-		var hud = GetNode<CanvasLayer>("../HUD");
+		var hud    = GetNode<CanvasLayer>("../HUD");
+		var accent = LevelGenerator.ThemeAccent;
 
-		// Per-player score labels, evenly distributed across the top
+		// ---- HUD bar background ----
+		var bg = new ColorRect
+		{
+			Color       = new Color(0.07f, 0.07f, 0.09f, 1f),
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+			Position    = Vector2.Zero,
+			Size        = new Vector2(ViewportWidth, HudHeight)
+		};
+		hud.AddChild(bg);
+
+		// ---- Separator line (themed accent colour) ----
+		var sep = new ColorRect
+		{
+			Color       = new Color(accent.R, accent.G, accent.B, 0.80f),
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+			Position    = new Vector2(0f, HudHeight - 2f),
+			Size        = new Vector2(ViewportWidth, 2f)
+		};
+		hud.AddChild(sep);
+
+		// ---- Per-player score labels — spread evenly across the bar ----
 		_scoreLabels = new Label[PlayerCount];
 		for (int i = 0; i < PlayerCount; i++)
 		{
-			_scoreLabels[i] = CreateLabel(hud, fontSize: 22);
+			_scoreLabels[i]          = CreateLabel(hud, fontSize: 24);
+			_scoreLabels[i].Modulate = Player.ColorFor(i);
 			PositionLabelTopEdge(_scoreLabels[i], playerIndex: i);
 			UpdateScoreUI(i);
 		}
 
-		// Timer — top centre
-		_timerLabel = CreateLabel(hud, fontSize: 36);
+		// ---- Timer — centred in the bar ----
+		_timerLabel = CreateLabel(hud, fontSize: 34);
 		_timerLabel.HorizontalAlignment = HorizontalAlignment.Center;
 		_timerLabel.OffsetLeft   = ArenaCenterX - 50f;
-		_timerLabel.OffsetTop    =  8f;
+		_timerLabel.OffsetTop    =  9f;
 		_timerLabel.OffsetRight  = ArenaCenterX + 50f;
-		_timerLabel.OffsetBottom = 56f;
+		_timerLabel.OffsetBottom = HudHeight - 8f;
 
-		// Round / match outcome message — centred, hidden until needed
+		// ---- Round / match outcome message — centred over game area ----
 		_messageLabel = CreateLabel(hud, fontSize: 30);
 		_messageLabel.HorizontalAlignment = HorizontalAlignment.Center;
 		_messageLabel.AutowrapMode        = TextServer.AutowrapMode.Word;
@@ -271,8 +309,8 @@ public partial class GameManager : Node
 		_messageLabel.AnchorBottom  = 0.5f;
 		_messageLabel.OffsetLeft    = -280f;
 		_messageLabel.OffsetRight   =  280f;
-		_messageLabel.OffsetTop     =  -70f;
-		_messageLabel.OffsetBottom  =   70f;
+		_messageLabel.OffsetTop     =  -60f;
+		_messageLabel.OffsetBottom  =   60f;
 		_messageLabel.Visible       = false;
 	}
 
@@ -309,19 +347,22 @@ public partial class GameManager : Node
 
 	private void SetupDangerZones()
 	{
-		var hud = GetNode<CanvasLayer>("../HUD");
+		var hud    = GetNode<CanvasLayer>("../HUD");
+		var accent = LevelGenerator.ThemeAccent;
+		var dark   = LevelGenerator.ThemeDark;
+		var ovCol  = new Color(dark.R, dark.G, dark.B, 0.94f);
 
-		// Back: void tint that fills the dead zone
-		_leftOverlay  = MakeDangerRect(hud, new Color(0.04f, 0.04f, 0.04f, 0.94f));
-		_rightOverlay = MakeDangerRect(hud, new Color(0.04f, 0.04f, 0.04f, 0.94f));
+		// Back: themed void tint filling the dead zone
+		_leftOverlay  = MakeDangerRect(hud, ovCol);
+		_rightOverlay = MakeDangerRect(hud, ovCol);
 
-		// Mid: pulsing wall face
+		// Mid: pulsing themed wall face
 		_leftWall  = MakeDangerRect(hud, Colors.Transparent);
 		_rightWall = MakeDangerRect(hud, Colors.Transparent);
 
-		// Front: crisp white kill-line at inner edge
-		_leftEdge  = MakeDangerRect(hud, Colors.White);
-		_rightEdge = MakeDangerRect(hud, Colors.White);
+		// Front: theme-accent edge line
+		_leftEdge  = MakeDangerRect(hud, accent);
+		_rightEdge = MakeDangerRect(hud, accent);
 
 		// Hidden until shrinking begins
 		SetDangerZonesVisible(false);
@@ -344,7 +385,7 @@ public partial class GameManager : Node
 		return r;
 	}
 
-	private void UpdateDangerZoneVisuals()
+	private void UpdateDangerZoneVisuals(bool pulse = true)
 	{
 		const float Top    = -60f;
 		const float Height = ViewportHeight + 120f;
@@ -352,11 +393,15 @@ public partial class GameManager : Node
 
 		SetDangerZonesVisible(true);
 
-		// Wall face pulses at 2 Hz — bright on dark background
-		float pulse     = 0.72f + 0.28f * Mathf.Sin(_phaseTimer * Mathf.Pi * 4f);
-		var   wallColor = new Color(pulse, pulse, pulse, 1f);
-		_leftWall.Color  = wallColor;
-		_rightWall.Color = wallColor;
+		if (pulse)
+		{
+			// Wall face pulses at 2 Hz using the level theme accent colour
+			var   a = LevelGenerator.ThemeAccent;
+			float p = 0.50f + 0.50f * Mathf.Sin(_phaseTimer * Mathf.Pi * 4f);
+			_leftWall.Color  = new Color(a.R * p, a.G * p, a.B * p, 1f);
+			_rightWall.Color = _leftWall.Color;
+		}
+		// When pulse=false the caller has already committed the final solid colour.
 
 		float eleft  = EffectiveLeft;   // LeftBound  + WallFaceWidth
 		float eright = EffectiveRight;  // RightBound - WallFaceWidth
