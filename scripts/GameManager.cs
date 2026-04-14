@@ -61,6 +61,13 @@ public partial class GameManager : Node
 	private Label[] _scoreLabels  = [];
 	private Label   _timerLabel   = null!;
 	private Label   _messageLabel = null!;
+	private Label[] _powerUpLabels = [];
+
+	// --- Power-up grant state ---
+	private static readonly float[] _powerUpGrantTimes = [10f, 20f, 30f, 40f, 50f];
+	private int   _powerUpGrantIndex = 0;
+	private float _globalTimer       = 0f;
+	private static readonly System.Random _gmRng = new();
 
 	// --- Danger zone visuals (HUD CanvasLayer ColorRects, created at runtime) ---
 	// Rendered in the HUD CanvasLayer so they always appear above 2D world content.
@@ -143,6 +150,12 @@ public partial class GameManager : Node
 
 	public override void _Process(double delta)
 	{
+		if (_phase == Phase.Playing || _phase == Phase.Shrinking)
+		{
+			_globalTimer += (float)delta;
+			CheckPowerUpGrants();
+		}
+
 		switch (_phase)
 		{
 			case Phase.Playing:   UpdatePlaying(delta);   break;
@@ -150,6 +163,36 @@ public partial class GameManager : Node
 			case Phase.RoundEnd:  UpdateRoundEnd(delta);  break;
 			case Phase.MatchEnd:  UpdateMatchEnd();       break;
 		}
+	}
+
+	private void CheckPowerUpGrants()
+	{
+		if (_powerUpGrantIndex >= _powerUpGrantTimes.Length) return;
+		if (_globalTimer < _powerUpGrantTimes[_powerUpGrantIndex]) return;
+		_powerUpGrantIndex++;
+		GrantRandomPowerUps();
+	}
+
+	private void GrantRandomPowerUps()
+	{
+		var types = new[] { PowerUpType.Speed, PowerUpType.HighJump, PowerUpType.Float,
+							PowerUpType.Shield, PowerUpType.GroundPound, PowerUpType.Tiny };
+		foreach (var player in GetTree().GetNodesInGroup("players")
+										.OfType<Player>()
+										.Where(p => !p.IsEliminated))
+		{
+			// Always pick a type the player doesn't already have so grants are never wasted
+			var available = System.Array.FindAll(types, t => !player.HasPowerUp(t));
+			var pool = available.Length > 0 ? available : types;
+			player.ActivatePowerUp(pool[_gmRng.Next(pool.Length)]);
+		}
+	}
+
+	public void OnPowerUpChanged(int playerIndex, string display)
+	{
+		if (playerIndex >= _powerUpLabels.Length) return;
+		_powerUpLabels[playerIndex].Text     = display;
+		_powerUpLabels[playerIndex].Modulate = Colors.White;
 	}
 
 	private void UpdatePlaying(double delta)
@@ -209,6 +252,7 @@ public partial class GameManager : Node
 		{
 			if (!Input.IsActionJustPressed($"p{i + 1}_jump")) continue;
 			_scores = null; // reset for new match
+			Player.ResetAssignmentSeed();  // reshuffle colours + shapes for new match
 			GetTree().ReloadCurrentScene();
 			return;
 		}
@@ -291,6 +335,16 @@ public partial class GameManager : Node
 			UpdateScoreUI(i);
 		}
 
+		// ---- Per-player power-up indicator labels (lower slice of HUD bar) ----
+		_powerUpLabels = new Label[PlayerCount];
+		for (int i = 0; i < PlayerCount; i++)
+		{
+			_powerUpLabels[i] = CreateLabel(hud, fontSize: 13);
+			_powerUpLabels[i].HorizontalAlignment = HorizontalAlignment.Center;
+			_powerUpLabels[i].Text = "";
+			PositionPowerUpLabel(_powerUpLabels[i], i);
+		}
+
 		// ---- Timer — centred in the bar ----
 		_timerLabel = CreateLabel(hud, fontSize: 34);
 		_timerLabel.HorizontalAlignment = HorizontalAlignment.Center;
@@ -328,6 +382,19 @@ public partial class GameManager : Node
 		label.OffsetTop    = 10f;
 		label.OffsetRight  = cx + LabelWidth / 2f;
 		label.OffsetBottom = 40f;
+	}
+
+	private void PositionPowerUpLabel(Label label, int playerIndex)
+	{
+		const float LabelWidth = 200f;
+		const float Padding    =  20f;
+		float t  = PlayerCount > 1 ? (float)playerIndex / (PlayerCount - 1) : 0.5f;
+		float cx = Mathf.Lerp(Padding + LabelWidth / 2f, ViewportWidth - Padding - LabelWidth / 2f, t);
+		label.HorizontalAlignment = HorizontalAlignment.Center;
+		label.OffsetLeft   = cx - LabelWidth / 2f;
+		label.OffsetTop    = 38f;
+		label.OffsetRight  = cx + LabelWidth / 2f;
+		label.OffsetBottom = 52f;
 	}
 
 	private static Label CreateLabel(CanvasLayer parent, int fontSize)
