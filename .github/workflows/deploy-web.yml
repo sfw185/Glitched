@@ -1,0 +1,76 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  export-web:
+    runs-on: ubuntu-latest
+    container:
+      image: barichello/godot-ci:4.6.2
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          apt-get update && apt-get install -y fontconfig curl
+
+      - name: Setup export templates
+        run: |
+          # GH Actions containers use $HOME which may differ from /root
+          TEMPLATE_DIR="$HOME/.local/share/godot/export_templates/4.6.2.stable"
+          mkdir -p "$TEMPLATE_DIR"
+          # barichello/godot-ci stores templates in /root/.local/share/godot/export_templates/
+          # Copy from all possible source locations
+          for src in /root/.local/share/godot/export_templates/4.6.2.stable \
+                     /root/.local/share/godot/templates; do
+            if [ -d "$src" ]; then
+              cp "$src"/* "$TEMPLATE_DIR/" 2>/dev/null || true
+            fi
+          done
+          echo "Templates in $TEMPLATE_DIR:"
+          ls -la "$TEMPLATE_DIR/" || echo "  (empty)"
+
+      - name: Import project
+        run: godot --headless --import
+        timeout-minutes: 3
+
+      - name: Export Web build
+        run: |
+          mkdir -p builds/web
+          godot --headless --export-release "Web" builds/web/index.html
+
+      - name: Install coi-serviceworker
+        run: |
+          # SharedArrayBuffer requires cross-origin isolation headers.
+          # GitHub Pages can't set custom headers, so we use a service worker.
+          curl -fsSL https://raw.githubusercontent.com/gzuidhof/coi-serviceworker/master/coi-serviceworker.min.js \
+            -o builds/web/coi-serviceworker.min.js
+          sed -i 's|</head>|<script src="coi-serviceworker.min.js"></script></head>|' builds/web/index.html
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: builds/web
+
+  deploy:
+    needs: export-web
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

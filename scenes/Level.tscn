@@ -1,8 +1,8 @@
 [gd_scene load_steps=10 format=3 uid="uid://b0level"]
 
-[ext_resource type="Script" path="res://scripts/Player.cs" id="1_player"]
-[ext_resource type="Script" path="res://scripts/LevelGenerator.cs" id="2_generator"]
-[ext_resource type="Script" path="res://scripts/GameManager.cs" id="3_gamemanager"]
+[ext_resource type="Script" path="res://scripts/player.gd" id="1_player"]
+[ext_resource type="Script" path="res://scripts/level_generator.gd" id="2_generator"]
+[ext_resource type="Script" path="res://scripts/game_manager.gd" id="3_gamemanager"]
 
 [sub_resource type="RectangleShape2D" id="Shape_p1"]
 size = Vector2(28, 48)
@@ -26,7 +26,7 @@ position = Vector2(640, 360)
 
 [node name="LevelGenerator" type="Node2D" parent="."]
 script = ExtResource("2_generator")
-PlayerCount = 2
+player_count = 2
 
 [node name="Ground" type="StaticBody2D" parent="."]
 position = Vector2(640, 700)
@@ -59,7 +59,7 @@ shape = SubResource("Shape_ceiling")
 [node name="Player1" type="CharacterBody2D" parent="."]
 position = Vector2(160, 446)
 script = ExtResource("1_player")
-PlayerIndex = 0
+player_index = 0
 
 [node name="Visual" type="Polygon2D" parent="Player1"]
 polygon = PackedVector2Array(-14, -24, 14, -24, 14, 24, -14, 24)
@@ -71,7 +71,7 @@ shape = SubResource("Shape_p1")
 [node name="Player2" type="CharacterBody2D" parent="."]
 position = Vector2(1120, 446)
 script = ExtResource("1_player")
-PlayerIndex = 1
+player_index = 1
 
 [node name="Visual" type="Polygon2D" parent="Player2"]
 polygon = PackedVector2Array(-14, -24, 14, -24, 14, 24, -14, 24)
@@ -82,6 +82,6 @@ shape = SubResource("Shape_p2")
 
 [node name="GameManager" type="Node" parent="."]
 script = ExtResource("3_gamemanager")
-PlayerCount = 2
+player_count = 2
 
 [node name="HUD" type="CanvasLayer" parent="."]
