@@ -59,6 +59,9 @@ jobs:
             -o builds/web/coi-serviceworker.min.js
           sed -i 's|</head>|<script src="coi-serviceworker.min.js"></script></head>|' builds/web/index.html
 
+      - name: Add CNAME for custom domain
+        run: echo "playglitched.com" > builds/web/CNAME
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
