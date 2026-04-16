@@ -2,6 +2,58 @@ extends CharacterBody2D
 
 enum PowerUpType { NONE, SPEED, HIGH_JUMP, FLOAT, SHIELD, GROUND_POUND, TINY }
 
+# ---- Power-up gameplay constants (referenced by descriptions below) ----
+const PWR_SPEED_MULT: float       = 1.7
+const PWR_JUMP_MULT: float        = 1.6
+const PWR_GRAVITY_MULT: float     = 0.3
+const PWR_SLAM_SPEED: float       = 1100.0
+const PWR_SLAM_KILL_RANGE: float  = 30.0
+const PWR_SLAM_PUSH_RANGE: float  = 100.0
+const PWR_TINY_SCALE: float       = 0.7
+
+## Central registry for all power-ups.  The info screen, HUD codes,
+## and indicator colours all read from this — adding a new entry here
+## automatically updates every consumer.
+static var POWER_UP_INFO: Dictionary = {
+	PowerUpType.SPEED: {
+		"name": "Speed",
+		"code": "SPD",
+		"color": Color(1.00, 1.00, 0.00),
+		"desc": "Move %.0f%% faster." % ((PWR_SPEED_MULT - 1.0) * 100.0),
+	},
+	PowerUpType.HIGH_JUMP: {
+		"name": "High Jump",
+		"code": "HJP",
+		"color": Color(0.10, 1.00, 0.30),
+		"desc": "Jump %.0f%% higher." % ((PWR_JUMP_MULT - 1.0) * 100.0),
+	},
+	PowerUpType.FLOAT: {
+		"name": "Float",
+		"code": "FLT",
+		"color": Color(0.28, 0.95, 1.00),
+		"desc": "Gravity reduced to %.0f%%." % (PWR_GRAVITY_MULT * 100.0),
+	},
+	PowerUpType.SHIELD: {
+		"name": "Shield",
+		"code": "SLD",
+		"color": Color.WHITE,
+		"desc": "Absorbs one hit, then breaks.",
+	},
+	PowerUpType.GROUND_POUND: {
+		"name": "Ground Pound",
+		"code": "GND",
+		"color": Color(1.00, 0.10, 0.10),
+		"desc": "Press down in mid-air to slam at %.0f px/s. Eliminates players within %.0f px, pushes within %.0f px." \
+			% [PWR_SLAM_SPEED, PWR_SLAM_KILL_RANGE, PWR_SLAM_PUSH_RANGE],
+	},
+	PowerUpType.TINY: {
+		"name": "Tiny",
+		"code": "TNY",
+		"color": Color(0.80, 0.00, 1.00),
+		"desc": "Shrink to %.0f%% size — harder to hit." % (PWR_TINY_SCALE * 100.0),
+	},
+}
+
 @export var player_index: int  = 0
 @export var speed: float       = 200.0
 @export var jump_velocity: float = -450.0
@@ -203,14 +255,14 @@ func _physics_process(delta: float) -> void:
 
 	# Gravity — Float makes it dreamy
 	if not is_on_floor():
-		var grav: float = GRAVITY * 0.3 if _pwr_float else GRAVITY
+		var grav: float = GRAVITY * PWR_GRAVITY_MULT if _pwr_float else GRAVITY
 		vel.y += grav * delta
 
 	if is_on_floor():
 		_can_double_jump = true
 
 	# Jump — HighJump amplifies it
-	var eff_jump: float = jump_velocity * 1.6 if _pwr_high_jump else jump_velocity
+	var eff_jump: float = jump_velocity * PWR_JUMP_MULT if _pwr_high_jump else jump_velocity
 	if Input.is_action_just_pressed(_prefix + "_jump"):
 		if is_on_floor():
 			vel.y = eff_jump
@@ -221,14 +273,14 @@ func _physics_process(delta: float) -> void:
 			_play(_snd_double_jumps[player_index])
 
 	# Horizontal — Speed amplifies it
-	var eff_speed: float = speed * 1.7 if _pwr_speed else speed
+	var eff_speed: float = speed * PWR_SPEED_MULT if _pwr_speed else speed
 	vel.x = Input.get_axis(_prefix + "_left", _prefix + "_right") * eff_speed
 
 	# Down — fast-fall always; GroundPound arms the slam
 	if Input.is_action_just_pressed(_prefix + "_down") and not is_on_floor():
 		if _pwr_ground_pound:
 			_ground_pound_armed = true
-			vel.y = 1100.0
+			vel.y = PWR_SLAM_SPEED
 		else:
 			if vel.y < 600.0:
 				vel.y = 600.0
@@ -319,20 +371,15 @@ func _refresh_indicators() -> void:
 
 
 func _power_indicator_color(type: int) -> Color:
-	match type:
-		PowerUpType.SPEED:        return Color(1.00, 1.00, 0.00)
-		PowerUpType.HIGH_JUMP:    return Color(0.10, 1.00, 0.30)
-		PowerUpType.FLOAT:        return Color(0.28, 0.95, 1.00)
-		PowerUpType.SHIELD:       return Color.WHITE
-		PowerUpType.GROUND_POUND: return Color(1.00, 0.10, 0.10)
-		PowerUpType.TINY:         return Color(0.80, 0.00, 1.00)
+	if POWER_UP_INFO.has(type):
+		return POWER_UP_INFO[type]["color"]
 	return Color.WHITE
 
 
 func _apply_tiny_scale(shrink: bool) -> void:
-	_body_root.scale = Vector2(0.7, 0.7) if shrink else Vector2.ONE
+	_body_root.scale = Vector2(PWR_TINY_SCALE, PWR_TINY_SCALE) if shrink else Vector2.ONE
 	(_collision_shape.shape as RectangleShape2D).size = \
-		_original_shape_size * 0.7 if shrink else _original_shape_size
+		_original_shape_size * PWR_TINY_SCALE if shrink else _original_shape_size
 
 
 func _check_ground_pound_landing() -> void:
@@ -347,9 +394,9 @@ func _check_ground_pound_landing() -> void:
 		if other == self or other.is_eliminated or other._spawn_timer > 0.0:
 			continue
 		var dx: float = absf(other.global_position.x - my_x)
-		if dx <= 30.0:
+		if dx <= PWR_SLAM_KILL_RANGE:
 			other.eliminate(player_index)
-		elif dx <= 100.0:
+		elif dx <= PWR_SLAM_PUSH_RANGE:
 			var v: Vector2 = other.velocity
 			v.x += (1.0 if other.global_position.x > my_x else -1.0) * 350.0
 			other.velocity = v
@@ -357,12 +404,9 @@ func _check_ground_pound_landing() -> void:
 
 func _build_power_up_display() -> String:
 	var s: String = ""
-	if _pwr_speed:        s += "SPD "
-	if _pwr_high_jump:    s += "HJP "
-	if _pwr_float:        s += "FLT "
-	if _pwr_shield:       s += "SLD "
-	if _pwr_ground_pound: s += "GND "
-	if _pwr_tiny:         s += "TNY "
+	for type in PWR_ORDER:
+		if has_power_up(type):
+			s += POWER_UP_INFO[type]["code"] + " "
 	return s.strip_edges()
 
 
