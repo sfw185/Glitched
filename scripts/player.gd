@@ -121,6 +121,7 @@ var _stride_phase: float  = 0.0
 # ---- Animated skin pattern ----
 var _pattern_time: float     = 0.0
 var _pattern_polys: Array[Polygon2D] = []
+var _pattern_buffers: Array[PackedVector2Array] = []  # pre-allocated polygon buffers
 
 # ---- Robot legs (wheels) ----
 var _left_thigh: Polygon2D
@@ -529,7 +530,11 @@ func _setup_pattern(accent: Color) -> void:
 					p.position = Vector2(xs[c], ys[r])
 					_pattern_polys.append(p)
 
+	# Pre-allocate polygon buffers (4 verts each) so _update_pattern can mutate in-place
+	_pattern_buffers = []
 	for p in _pattern_polys:
+		var buf := PackedVector2Array(p.polygon)  # copy initial polygon
+		_pattern_buffers.append(buf)
 		_body_root.add_child(p)
 
 
@@ -548,24 +553,32 @@ func _update_pattern() -> void:
 	const BH: float = 40.0
 
 	match _pattern_choice:
-		0:  # PULSE
+		0:  # PULSE — colour-only, no polygon change
 			var a: float = (sin(_pattern_time * 2.4) * 0.5 + 0.5) * 0.22
 			_pattern_polys[0].color = Color(ac.r, ac.g, ac.b, a)
-		1:  # SCANLINES
+		1:  # SCANLINES — mutate cached buffers in-place
 			var spacing: float = BH / _pattern_polys.size()
 			for i in range(_pattern_polys.size()):
 				var y: float = BT + fmod(_pattern_time * 20.0 + i * spacing, BH)
-				_pattern_polys[i].polygon = PackedVector2Array([
-					Vector2(-BW,y), Vector2(BW,y), Vector2(BW,y+2.5), Vector2(-BW,y+2.5)])
-		2:  # SWEEP
+				var buf := _pattern_buffers[i]
+				buf[0] = Vector2(-BW, y)
+				buf[1] = Vector2( BW, y)
+				buf[2] = Vector2( BW, y + 2.5)
+				buf[3] = Vector2(-BW, y + 2.5)
+				_pattern_polys[i].polygon = buf
+		2:  # SWEEP — mutate cached buffers in-place
 			for i in range(_pattern_polys.size()):
 				var phase: float = fmod(_pattern_time * 0.65 + i * 0.5, 1.0)
 				var x: float = lerpf(-BW, BW, phase)
 				var a: float = sin(phase * PI) * 0.60
-				_pattern_polys[i].polygon = PackedVector2Array([
-					Vector2(x-1.5,BT), Vector2(x+1.5,BT), Vector2(x+1.5,BB), Vector2(x-1.5,BB)])
+				var buf := _pattern_buffers[i]
+				buf[0] = Vector2(x - 1.5, BT)
+				buf[1] = Vector2(x + 1.5, BT)
+				buf[2] = Vector2(x + 1.5, BB)
+				buf[3] = Vector2(x - 1.5, BB)
+				_pattern_polys[i].polygon = buf
 				_pattern_polys[i].color = Color(ac.r, ac.g, ac.b, a)
-		3:  # GRID
+		3:  # GRID — colour-only, no polygon change
 			for i in range(_pattern_polys.size()):
 				var a: float = (sin(_pattern_time * 2.1 + i * 0.72) * 0.5 + 0.5) * 0.75 + 0.05
 				_pattern_polys[i].color = Color(ac.r, ac.g, ac.b, a)

@@ -65,12 +65,21 @@ var _audio: AudioStreamPlayer
 static var _snd_round_start: AudioStreamWAV
 static var _snd_eliminate: AudioStreamWAV
 
-# Preload player script to access its enums/statics
+# Preload player script for enum/static access
 const PlayerScript = preload("res://scripts/player.gd")
+
+# Theme colours — cached from LevelGenerator in _ready() to avoid cyclic preload
+var _theme_accent: Color
+var _theme_dark: Color
 
 
 func _ready() -> void:
 	add_to_group("game_manager")
+
+	# Cache theme colours from LevelGenerator (avoids cyclic preload)
+	var lg_script = load("res://scripts/level_generator.gd")
+	_theme_accent = lg_script.theme_accent
+	_theme_dark   = lg_script.theme_dark
 
 	if _scores.size() == 0 or _scored_player_count != player_count:
 		_scores = []
@@ -93,6 +102,12 @@ func _ready() -> void:
 	add_child(_audio)
 
 	_play_sound(_snd_round_start)
+
+	# Pause menu — lives as a child, handles its own ESC input
+	var pause_menu_script = preload("res://scripts/pause_menu.gd")
+	var pause_menu := CanvasLayer.new()
+	pause_menu.set_script(pause_menu_script)
+	add_child(pause_menu)
 
 
 func _exit_tree() -> void:
@@ -191,7 +206,7 @@ func _update_shrinking(delta: float) -> void:
 	if _phase_timer >= SHRINK_DURATION:
 		if not _shrink_locked:
 			_shrink_locked = true
-			var accent: Color = preload("res://scripts/level_generator.gd").theme_accent
+			var accent: Color = _theme_accent
 			_left_wall.color  = accent
 			_right_wall.color = accent
 			_update_danger_zone_visuals(false)
@@ -261,7 +276,7 @@ func _start_match_end(winner_index: int) -> void:
 
 func _setup_hud() -> void:
 	var hud: CanvasLayer = get_node("../HUD")
-	var accent: Color = preload("res://scripts/level_generator.gd").theme_accent
+	var accent: Color = _theme_accent
 
 	# HUD bar background
 	var bg := ColorRect.new()
@@ -361,9 +376,8 @@ func _update_score_ui(player_index: int) -> void:
 
 func _setup_danger_zones() -> void:
 	var hud: CanvasLayer = get_node("../HUD")
-	var LevelGen = preload("res://scripts/level_generator.gd")
-	var accent: Color = LevelGen.theme_accent
-	var dark: Color   = LevelGen.theme_dark
+	var accent: Color = _theme_accent
+	var dark: Color   = _theme_dark
 	var ov_col := Color(dark.r, dark.g, dark.b, 0.94)
 
 	_left_overlay  = _make_danger_rect(hud, ov_col)
@@ -400,7 +414,7 @@ func _update_danger_zone_visuals(pulse: bool) -> void:
 	_set_danger_zones_visible(true)
 
 	if pulse:
-		var a: Color = preload("res://scripts/level_generator.gd").theme_accent
+		var a: Color = _theme_accent
 		var p: float = 0.50 + 0.50 * sin(_phase_timer * PI * 4.0)
 		_left_wall.color  = Color(a.r * p, a.g * p, a.b * p, 1.0)
 		_right_wall.color = _left_wall.color
